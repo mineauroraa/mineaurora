@@ -13,14 +13,19 @@
   5. По второму запросу подтверждает код и возвращает плагину
      настоящий Discord-юзернейм для привязки.
 
-Как подключить (в mineaurora_bot.py):
+Как подключить (в mineaurora_bot.py), ПЕРЕД client.run(TOKEN):
     import staffwork_api
-    ...
-    # ПЕРЕД client.run(TOKEN):
     staffwork_api.start_staffwork_api(client)
 
-    Если токен читаешь через os.getenv("DISCORD_TOKEN"), просто добавь
-    строки выше — ничего больше менять не нужно.
+    Пример (самый низ файла):
+        if __name__ == "__main__":
+            TOKEN = TOKEN.strip() if TOKEN else TOKEN
+            import staffwork_api
+            staffwork_api.start_staffwork_api(client)
+            try:
+                log.info("Запуск бота...")
+                client.run(TOKEN, log_level=logging.INFO)
+            ...
 
 Эндпоинты (JSON):
     POST /verify   {"player": "...", "username": "...", "token": "..."}
@@ -34,7 +39,6 @@ import time
 
 from aiohttp import web
 import discord
-from discord.utils import get
 
 log = logging.getLogger("mineaurora.staffwork")
 
@@ -43,7 +47,7 @@ log = logging.getLogger("mineaurora.staffwork")
 # ═══════════════════════════════════════════════════════════════
 
 # Адрес и порт HTTP-сервера. Порт должен быть доступен с Minecraft-сервера.
-# Если плагин и бот на одной машине — оставь 127.0.0.1:8080.
+# Если плагин и бот на одной машине — оставь 0.0.0.0:8080.
 HOST = "0.0.0.0"
 PORT = 8080
 
@@ -72,7 +76,7 @@ _pending = {}  # nick_lower -> {"code": str, "user_id": int, "username": str, "e
 
 
 def _norm(s):
-    return s.strip().lower()
+    return str(s).strip().lower()
 
 
 def _staff_roles_norm():
@@ -87,15 +91,15 @@ def _resolve_guild(client):
 
 def _find_member(guild, username):
     target = _norm(username)
-    # сначала точное совпадение по name / global_name
+    if not target:
+        return None
     for m in guild.members:
-        if _norm(getattr(m, "name", "")).strip() == target:
+        if _norm(getattr(m, "name", "")) == target:
             return m
     for m in guild.members:
         gn = getattr(m, "global_name", None) or ""
-        if _norm(gn).strip() == target:
+        if _norm(gn) == target:
             return m
-    # потом поиск по префиксу (вдруг ввели без #0000)
     for m in guild.members:
         if _norm(getattr(m, "name", "")).startswith(target):
             return m
@@ -116,9 +120,6 @@ async def _handle_verify(client, data):
         return web.json_response({"status": "no_guild"}, status=200)
 
     username = data.get("username", "")
-    if not username:
-        return web.json_response({"status": "not_found"}, status=200)
-
     member = _find_member(guild, username)
     if member is None:
         return web.json_response({"status": "not_found"}, status=200)
@@ -145,8 +146,8 @@ async def _handle_verify(client, data):
     except discord.Forbidden:
         _pending.pop(_norm(data.get("player", "")), None)
         return web.json_response({"status": "dm_failed"}, status=200)
-    except Exception as e:  # noqa: BLE001
-        log.exception("Ошибка отправки ЛС: %s", e)
+    except Exception:  # noqa: BLE001
+        log.exception("Ошибка отправки ЛС")
         _pending.pop(_norm(data.get("player", "")), None)
         return web.json_response({"status": "dm_failed"}, status=200)
 
@@ -187,7 +188,8 @@ async def _route(request):
 
 
 def start_staffwork_api(client: discord.Client, host: str = HOST, port: int = PORT):
-    """Запускает HTTP-сервер в том же event loop, что и discord-бот."""
+    """Регистрирует HTTP-сервер. Он запустится автоматически, когда бот
+    войдёт в сеть (on_ready) — на том же event loop, что и discord."""
 
     app = web.Application()
     app["client"] = client
@@ -195,18 +197,18 @@ def start_staffwork_api(client: discord.Client, host: str = HOST, port: int = PO
     app.router.add_post("/confirm", _route)
     app.router.add_get("/health", _route)
 
-    async def _start():
+    state = {"started": False}
+
+    async def _on_ready():
+        if state["started"]:
+            return
+        state["started"] = True
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, host, port)
         await site.start()
         log.info("StaffWork API слушает на %s:%s", host, port)
 
-    # регистрируем задачу в цикле бота
-    try:
-        client.loop.create_task(_start())
-    except RuntimeError:
-        # на случай, если loop ещё не создан
-        asyncio.get_event_loop().create_task(_start())
-
-    log.info("StaffWork API подключён. Ключ: %s...", API_TOKEN[:4])
+    # подключаемся к событию on_ready (не мешает твоему on_ready в боте)
+    client.add_listener(_on_ready, "on_ready")
+    log.info("StaffWork API подключён (старт по on_ready). Ключ: %s...", API_TOKEN[:4])
